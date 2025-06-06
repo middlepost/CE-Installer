@@ -1,0 +1,21 @@
+{
+  "name": "chrome-extension-installer",
+  "version": "1.0.0",
+  "description": "A professional tool for installing and managing Chrome extensions",
+  "dependencies": [
+    {
+      "name": "windows-sdk",
+      "platform": "windows"
+    },
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ],
+  "builtin-baseline": "2024-03-01",
+  "supports": "windows & x64"
+} 
